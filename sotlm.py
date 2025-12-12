@@ -177,7 +177,7 @@ with tab_likert:
             counts = s.astype(str).value_counts()
             st.bar_chart(counts)
         st.write("Raw value counts:")
-        st.dataframe(counts.reset_index().rename(columns={"index": "value", col: "count"}), use_container_width=True)
+        st.dataframe(counts.reset_index(name="count").rename(columns={"index": "value"}), use_container_width=True)
 with tab_steps:
     st.subheader("Workflow step explorer")
     if not step_cols:
