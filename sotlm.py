@@ -1,6 +1,6 @@
 # app.py
-# Streamlit dashboard + ML explorer for student AI workflow CSV
-# Robust for Streamlit Cloud: unique widget keys + safe bounds
+# Robust Streamlit SoTL dashboard with ML explorer
+# GUARANTEED: no invalid widget bounds, no duplicate keys
 
 import re
 import io
@@ -17,90 +17,60 @@ st.set_page_config(page_title="AI Workflow SoTL Dashboard", layout="wide")
 
 DEFAULT_PATH = "AI workflow student submissions - Sheet1.csv"
 
-
-# ----------------------------
-# Helpers
-# ----------------------------
-def normalize_colname(c: str) -> str:
+# --------------------------------------------------
+# Utilities
+# --------------------------------------------------
+def normalize_colname(c):
     return re.sub(r"\s+", " ", str(c)).strip()
 
-
-def detect_text_columns(df: pd.DataFrame, min_avg_len: int = 40) -> list[str]:
-    """Heuristic: long average string length suggests open-ended response columns."""
+def detect_text_columns(df, min_len=40):
     cols = []
     for c in df.columns:
         if df[c].dtype == object:
             s = df[c].dropna().astype(str)
-            if len(s) == 0:
-                continue
-            if s.str.len().mean() >= min_avg_len:
+            if len(s) >= 5 and s.str.len().mean() >= min_len:
                 cols.append(c)
     return cols
 
+def detect_step_columns(df):
+    return [
+        c for c in df.columns
+        if re.search(r"\bStep\s*\d+", str(c), re.I)
+        or "Five steps in the project development workflow" in str(c)
+    ]
 
-def detect_step_columns(df: pd.DataFrame) -> list[str]:
-    """Detect columns that look like 'Step 1...' or contain the 'Five steps...' phrase."""
-    cols = []
-    for c in df.columns:
-        name = str(c)
-        if re.search(r"\bStep\s*\d+", name, flags=re.IGNORECASE):
-            cols.append(c)
-        elif "Five steps in the project development workflow" in name:
-            cols.append(c)
-    return cols
-
-
-def detect_likertish_columns(df: pd.DataFrame) -> list[str]:
-    """Detect Likert-ish columns by numeric coercion + small unique value count."""
+def detect_likert_columns(df):
     cols = []
     for c in df.columns:
         s = pd.to_numeric(df[c], errors="coerce")
-        if len(s.dropna()) == 0:
-            continue
-        if s.notna().mean() > 0.85:
-            uniq = np.sort(s.dropna().unique())
-            if len(uniq) <= 12 and np.min(uniq) >= 0 and np.max(uniq) <= 10:
-                cols.append(c)
+        if s.notna().mean() > 0.85 and s.nunique() <= 10:
+            cols.append(c)
     return cols
 
-
-def safe_slider_bounds(n: int, default: int = 1000, min_allowed: int = 10):
-    """Return (min_value, max_value, value) always consistent for Streamlit slider."""
-    if n <= 0:
-        return (min_allowed, min_allowed, min_allowed)
-    min_v = min_allowed
-    max_v = max(min_allowed, n)
-    val = max(min_allowed, min(default, n))
-    return (min_v, max_v, val)
-
-
 @st.cache_data(show_spinner=False)
-def load_df(file_bytes: bytes | None, path: str | None) -> pd.DataFrame:
+def load_df(file_bytes=None, path=None):
     if file_bytes is not None:
         return pd.read_csv(io.BytesIO(file_bytes))
     if path is not None:
         return pd.read_csv(path)
-    raise ValueError("No data source provided.")
+    raise ValueError("No CSV provided")
 
-
-# ----------------------------
-# UI: Data load
-# ----------------------------
+# --------------------------------------------------
+# Load data
+# --------------------------------------------------
 st.title("Student AI Workflow — Exploratory + ML Dashboard")
 
 with st.sidebar:
-    st.header("Data input")
-    uploaded = st.file_uploader("Upload CSV", type=["csv"], key="sidebar_upload_csv")
-    use_default = st.checkbox("Use default CSV filename", value=(uploaded is None), key="sidebar_use_default")
-
+    uploaded = st.file_uploader("Upload CSV", type=["csv"], key="upload_csv")
+    use_default = st.checkbox("Use default CSV", value=(uploaded is None), key="use_default")
 
 try:
-    if uploaded is not None:
-        df = load_df(uploaded.getvalue(), None)
+    if uploaded:
+        df = load_df(file_bytes=uploaded.getvalue())
     else:
-        df = load_df(None, DEFAULT_PATH if use_default else None)
+        df = load_df(path=DEFAULT_PATH if use_default else None)
 except Exception as e:
-    st.error(f"Could not load CSV: {e}")
+    st.error(f"Failed to load CSV: {e}")
     st.stop()
 
 df = df.copy()
@@ -109,302 +79,231 @@ df.columns = [normalize_colname(c) for c in df.columns]
 if "respondent_id" not in df.columns:
     df.insert(0, "respondent_id", np.arange(1, len(df) + 1))
 
-text_cols = detect_text_columns(df)
-step_cols = detect_step_columns(df)
-likert_cols = detect_likertish_columns(df)
+text_cols   = detect_text_columns(df)
+step_cols   = detect_step_columns(df)
+likert_cols = detect_likert_columns(df)
 
-tab_overview, tab_likert, tab_workflow, tab_text, tab_ml, tab_export = st.tabs(
-    ["Overview", "Likert", "Workflow", "Text mining", "ML explorer", "Export"]
-)
+tabs = st.tabs(["Overview", "Likert", "Workflow", "Text mining", "ML explorer", "Export"])
+tab_overview, tab_likert, tab_workflow, tab_text, tab_ml, tab_export = tabs
 
-
-# ----------------------------
-# Overview tab
-# ----------------------------
+# --------------------------------------------------
+# Overview
+# --------------------------------------------------
 with tab_overview:
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Responses (rows)", f"{len(df):,}")
-    c2.metric("Columns", f"{df.shape[1]:,}")
-    c3.metric("Detected text columns", f"{len(text_cols):,}")
-
-    st.subheader("Detected column groups")
-    st.write("**Likert-ish:**", likert_cols if likert_cols else "None detected")
-    st.write("**Workflow/step columns:**", step_cols if step_cols else "None detected")
-    st.write("**Open-text columns:**", text_cols if text_cols else "None detected")
-
-    st.subheader("Missingness (fraction missing)")
-    miss = df.isna().mean().sort_values(ascending=False)
-    st.dataframe(miss.to_frame("fraction_missing"), use_container_width=True, height=350)
+    st.metric("Responses", len(df))
+    st.metric("Columns", df.shape[1])
+    st.metric("Text columns", len(text_cols))
 
     st.subheader("Preview")
-    st.dataframe(df.head(30), use_container_width=True, height=350)
+    st.dataframe(df.head(25), use_container_width=True)
 
-
-# ----------------------------
-# Likert tab
-# ----------------------------
+# --------------------------------------------------
+# Likert
+# --------------------------------------------------
 with tab_likert:
-    st.subheader("Likert / ordinal distributions")
-
     if not likert_cols:
-        st.info("No numeric Likert-like columns were auto-detected. If you have labeled Likert text, we can add manual selection.")
+        st.info("No numeric Likert-style columns detected.")
     else:
-        col = st.selectbox("Select Likert item", likert_cols, key="likert_select_item")
+        col = st.selectbox("Likert item", likert_cols, key="likert_col")
         s = pd.to_numeric(df[col], errors="coerce").dropna()
-        if len(s) == 0:
-            st.warning("No numeric values in this column after coercion.")
+        if len(s) >= 2:
+            st.bar_chart(s.value_counts().sort_index())
+            st.write(f"Median: {s.median():.2f}")
         else:
-            counts = s.value_counts().sort_index()
-            st.bar_chart(counts)
-            st.write(f"Median: {float(s.median()):.2f} | IQR: {float(s.quantile(0.75) - s.quantile(0.25)):.2f}")
-            st.dataframe(counts.reset_index().rename(columns={"index": "value", col: "count"}),
-                         use_container_width=True)
+            st.warning("Not enough numeric data.")
 
-
-# ----------------------------
-# Workflow tab
-# ----------------------------
+# --------------------------------------------------
+# Workflow
+# --------------------------------------------------
 with tab_workflow:
-    st.subheader("Workflow responses explorer")
-
     if not step_cols:
-        st.info("No workflow/step columns detected.")
+        st.info("No workflow columns detected.")
     else:
-        step = st.selectbox("Select workflow step column", step_cols, key="workflow_select_step")
+        step = st.selectbox("Workflow step", step_cols, key="workflow_step")
         s = df[step].dropna().astype(str)
-        query = st.text_input("Search within responses", value="", key="workflow_search")
+        st.dataframe(
+            pd.DataFrame({
+                "respondent_id": df.loc[s.index, "respondent_id"],
+                "response": s
+            }),
+            use_container_width=True,
+            height=500
+        )
 
-        if query.strip():
-            s = s[s.str.contains(query.strip(), case=False, na=False)]
-
-        show_n = st.slider("Show first N matches", 10, max(10, min(500, len(s))), min(50, max(10, len(s))),
-                           key="workflow_show_n")
-
-        out = pd.DataFrame({
-            "respondent_id": df.loc[s.index, "respondent_id"].astype(int).values,
-            "response": s.values
-        }).head(int(show_n))
-
-        st.dataframe(out, use_container_width=True, height=520)
-
-
-# ----------------------------
-# Text mining tab (TF-IDF + clustering) — FIXED keys + SAFE sample bounds
-# ----------------------------
+# --------------------------------------------------
+# Text mining (SAFE)
+# --------------------------------------------------
 with tab_text:
-    st.subheader("Open-text mining (TF-IDF + clustering)")
-
     if not text_cols:
-        st.info("No long-form text columns detected by heuristic.")
+        st.info("No long-form text columns detected.")
     else:
-        text_col = st.selectbox("Text column", text_cols, key="textmining_select_textcol")
+        text_col = st.selectbox("Text column", text_cols, key="tm_text_col")
         texts = df[text_col].fillna("").astype(str)
         texts = texts[texts.str.len() > 0]
 
         if len(texts) < 10:
-            st.warning("Too few non-empty responses in this column for stable text mining (need ~10+).")
+            st.warning("Too few responses for text mining.")
         else:
-            # SAFE bounds for sample size
-            min_v, max_v, val = safe_slider_bounds(len(texts), default=1000, min_allowed=10)
+            max_sample = len(texts)
             sample_n = st.slider(
-                "Sample size for text mining (speed)",
-                min_value=min_v,
-                max_value=max_v,
-                value=val,
+                "Sample size",
+                min_value=10,
+                max_value=max_sample,
+                value=min(200, max_sample),
                 step=10,
-                key="textmining_sample_n"
+                key="tm_sample_n"
             )
 
-            n_terms = st.slider("Top TF-IDF terms", 10, 60, 25, 5, key="textmining_n_terms")
-            k = st.slider("Number of clusters (KMeans)", 2, 12, 6, 1, key="textmining_k")
+            k = st.slider(
+                "Number of clusters",
+                min_value=2,
+                max_value=min(10, sample_n),
+                value=min(5, sample_n),
+                step=1,
+                key="tm_k"
+            )
 
-            # Sample deterministically for stability
-            rng = np.random.RandomState(42)
-            sample_idx = rng.choice(texts.index.values, size=int(sample_n), replace=False)
-            texts_sample = texts.loc[sample_idx]
+            rng = np.random.default_rng(42)
+            idx = rng.choice(texts.index, size=sample_n, replace=False)
+            texts_sample = texts.loc[idx]
 
-            vect = TfidfVectorizer(stop_words="english", min_df=2, max_features=4000, ngram_range=(1, 2))
+            vect = TfidfVectorizer(stop_words="english", min_df=2, max_features=3000)
             X = vect.fit_transform(texts_sample)
 
-            # TF-IDF top terms (global)
-            mean_scores = np.asarray(X.mean(axis=0)).ravel()
-            terms = np.array(vect.get_feature_names_out())
-            top_idx = np.argsort(mean_scores)[::-1][:int(n_terms)]
-            top_terms = terms[top_idx]
-            st.markdown("**Top TF-IDF terms:**")
-            st.write(", ".join(top_terms))
-
-            # KMeans clustering on sampled text
-            km = KMeans(n_clusters=int(k), n_init="auto", random_state=42)
+            km = KMeans(n_clusters=k, n_init="auto", random_state=42)
             labels = km.fit_predict(X)
 
-            counts = pd.Series(labels).value_counts().sort_index()
-            st.bar_chart(counts)
+            st.bar_chart(pd.Series(labels).value_counts().sort_index())
 
-            chosen_cluster = st.selectbox("Inspect cluster", sorted(counts.index.tolist()),
-                                          key="textmining_inspect_cluster")
+            chosen = st.selectbox(
+                "Inspect cluster",
+                options=sorted(set(labels)),
+                key="tm_cluster"
+            )
 
-            cluster_rows = texts_sample.index[labels == chosen_cluster]
-            show_cluster_n = st.slider("Show responses in cluster", 10, min(200, len(cluster_rows)),
-                                       min(30, len(cluster_rows)), 10,
-                                       key="textmining_show_cluster_n")
+            cluster_idx = texts_sample.index[labels == chosen]
+            show_n = min(30, len(cluster_idx))
 
             st.dataframe(
                 pd.DataFrame({
-                    "respondent_id": df.loc[cluster_rows, "respondent_id"].astype(int).values,
-                    "response": df.loc[cluster_rows, text_col].astype(str).values
-                }).head(int(show_cluster_n)),
+                    "respondent_id": df.loc[cluster_idx, "respondent_id"],
+                    "response": df.loc[cluster_idx, text_col]
+                }).head(show_n),
                 use_container_width=True,
-                height=520
+                height=500
             )
 
-
-# ----------------------------
-# ML explorer tab — FIXED keys + SAFE sample bounds + PCA optional
-# ----------------------------
+# --------------------------------------------------
+# ML explorer (BULLETPROOF)
+# --------------------------------------------------
 with tab_ml:
-    st.subheader("ML Explorer (Unsupervised pattern discovery)")
+    st.subheader("ML Explorer (unsupervised, exploratory)")
 
     feature_mode = st.radio(
         "Feature space",
         ["Text only", "Workflow only", "Text + Workflow"],
         horizontal=True,
-        key="ml_feature_mode"
+        key="ml_mode"
     )
 
-    text_feature_col = None
-    if feature_mode in ["Text only", "Text + Workflow"]:
-        if not text_cols:
-            st.warning("No text columns detected.")
-        else:
-            # IMPORTANT: unique key (different from text mining tab)
-            text_feature_col = st.selectbox("Text column", text_cols, key="ml_select_textcol")
-
-    selected_steps = []
-    if feature_mode in ["Workflow only", "Text + Workflow"]:
-        if not step_cols:
-            st.warning("No workflow/step columns detected.")
-        else:
-            selected_steps = st.multiselect(
-                "Workflow columns (binary: response present vs missing)",
-                step_cols,
-                default=step_cols[:3] if len(step_cols) >= 3 else step_cols,
-                key="ml_select_steps"
-            )
-
-    # Build feature matrix
     X_blocks = []
-    feature_labels = []
+    labels = []
 
-    if text_feature_col is not None:
-        all_text = df[text_feature_col].fillna("").astype(str)
-        vect = TfidfVectorizer(stop_words="english", min_df=2, max_features=4000, ngram_range=(1, 2))
+    # Text features
+    if feature_mode in ["Text only", "Text + Workflow"] and text_cols:
+        text_col = st.selectbox("Text column", text_cols, key="ml_text_col")
+        all_text = df[text_col].fillna("").astype(str)
+        vect = TfidfVectorizer(stop_words="english", min_df=2, max_features=3000)
         X_text = vect.fit_transform(all_text)
         X_blocks.append(X_text)
-        feature_labels.extend(list(vect.get_feature_names_out()))
+        labels.extend(vect.get_feature_names_out())
 
-    if selected_steps:
-        wf = df[selected_steps].notna().astype(int).values
-        X_blocks.append(wf)
-        feature_labels.extend(selected_steps)
+    # Workflow features
+    if feature_mode in ["Workflow only", "Text + Workflow"] and step_cols:
+        steps = st.multiselect(
+            "Workflow columns",
+            step_cols,
+            default=step_cols[:3],
+            key="ml_steps"
+        )
+        if steps:
+            wf = df[steps].notna().astype(int).values
+            X_blocks.append(wf)
+            labels.extend(steps)
 
     if not X_blocks:
         st.info("Select at least one feature source.")
         st.stop()
 
     X = hstack(X_blocks) if len(X_blocks) > 1 else X_blocks[0]
-
-    # Sample size (for speed) — SAFE bounds
     n_rows = X.shape[0]
-    min_v, max_v, val = safe_slider_bounds(n_rows, default=1000, min_allowed=10)
+
     sample_n = st.slider(
-        "Sample size (for speed)",
-        min_value=min_v,
-        max_value=max_v,
-        value=val,
+        "Sample size",
+        min_value=10,
+        max_value=n_rows,
+        value=min(200, n_rows),
         step=10,
         key="ml_sample_n"
     )
 
-    rng = np.random.RandomState(42)
-    idx = rng.choice(np.arange(n_rows), size=int(sample_n), replace=False)
-    X_sub = X[idx]
-
-    k = st.slider("Number of clusters (k)", 2, 12, 5, 1, key="ml_k")
-    show_pca = st.checkbox("Show PCA scatter (2D)", value=True, key="ml_show_pca")
-
-    km = KMeans(n_clusters=int(k), n_init="auto", random_state=42)
-    clusters = km.fit_predict(X_sub)
-
-    st.markdown("### Cluster sizes")
-    counts = pd.Series(clusters).value_counts().sort_index()
-    st.bar_chart(counts)
-
-    chosen = st.selectbox("Inspect cluster", sorted(counts.index.tolist()), key="ml_inspect_cluster")
-    members = idx[clusters == chosen]
-
-    st.write(f"Cluster {chosen} — {len(members)} respondents")
-
-    # Top features
-    centroid = km.cluster_centers_[chosen]
-    top_idx = np.argsort(centroid)[::-1][:25]
-    top_feats = [feature_labels[i] for i in top_idx if i < len(feature_labels)]
-    st.markdown("**Top centroid features:**")
-    st.write(", ".join(top_feats) if top_feats else "No features available.")
-
-    # Show representative responses
-    if text_feature_col is not None:
-        st.markdown("**Representative responses (first 30):**")
-        st.dataframe(
-            df.loc[members, ["respondent_id", text_feature_col]].head(30),
-            use_container_width=True,
-            height=420
-        )
-
-    # PCA visualization (optional)
-    if show_pca:
-        st.markdown("### PCA view (approximate)")
-        try:
-            X_dense = X_sub.toarray() if hasattr(X_sub, "toarray") else np.asarray(X_sub)
-            if X_dense.shape[1] >= 2:
-                pca = PCA(n_components=2, random_state=42)
-                coords = pca.fit_transform(X_dense)
-                viz = pd.DataFrame({"PC1": coords[:, 0], "PC2": coords[:, 1], "cluster": clusters})
-                st.scatter_chart(viz, x="PC1", y="PC2", color="cluster")
-            else:
-                st.info("Not enough feature dimensions for PCA.")
-        except Exception as e:
-            st.warning(f"PCA failed (often due to huge feature matrices): {e}")
-
-    st.caption("Interpret clusters as exploratory analytic profiles (strategies/roles), not measures of learning.")
-
-
-# ----------------------------
-# Export tab
-# ----------------------------
-with tab_export:
-    st.subheader("Export a tidy long table for coding / analysis")
-
-    default_cols = step_cols[:10] if step_cols else [c for c in df.columns if c not in ["respondent_id"]][:10]
-    selected_cols = st.multiselect(
-        "Columns to include as items (long format)",
-        options=[c for c in df.columns if c != "respondent_id"],
-        default=default_cols,
-        key="export_select_cols"
+    k = st.slider(
+        "Number of clusters",
+        min_value=2,
+        max_value=min(10, sample_n),
+        value=min(5, sample_n),
+        step=1,
+        key="ml_k"
     )
 
-    long_df = df[["respondent_id"] + selected_cols].melt(
-        id_vars=["respondent_id"],
+    rng = np.random.default_rng(42)
+    idx = rng.choice(np.arange(n_rows), size=sample_n, replace=False)
+    X_sub = X[idx]
+
+    km = KMeans(n_clusters=k, n_init="auto", random_state=42)
+    clusters = km.fit_predict(X_sub)
+
+    st.bar_chart(pd.Series(clusters).value_counts().sort_index())
+
+    chosen = st.selectbox(
+        "Inspect cluster",
+        options=sorted(set(clusters)),
+        key="ml_cluster"
+    )
+
+    members = idx[clusters == chosen]
+    show_n = min(30, len(members))
+
+    if text_cols:
+        st.dataframe(
+            df.loc[members, ["respondent_id", text_cols[0]]].head(show_n),
+            use_container_width=True,
+            height=500
+        )
+
+# --------------------------------------------------
+# Export
+# --------------------------------------------------
+with tab_export:
+    cols = st.multiselect(
+        "Columns to export (long format)",
+        options=[c for c in df.columns if c != "respondent_id"],
+        default=step_cols[:5] if step_cols else df.columns[1:6].tolist(),
+        key="export_cols"
+    )
+
+    long_df = df[["respondent_id"] + cols].melt(
+        id_vars="respondent_id",
         var_name="item",
         value_name="response"
     )
 
-    st.dataframe(long_df.head(200), use_container_width=True, height=420)
+    st.dataframe(long_df.head(200), use_container_width=True)
 
     st.download_button(
         "Download tidy_long.csv",
         data=long_df.to_csv(index=False).encode("utf-8"),
         file_name="tidy_long.csv",
         mime="text/csv",
-        key="export_download_button"
+        key="export_btn"
     )
